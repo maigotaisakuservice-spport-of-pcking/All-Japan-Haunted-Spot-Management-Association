@@ -1,0 +1,1 @@
+# All-Japan-Haunted-Spot-Management-Association
