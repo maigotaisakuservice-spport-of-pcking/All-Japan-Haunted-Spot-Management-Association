@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>全日本心霊スポット管理協会 - 本格3D版</title>
+<style>
+html, body { margin:0; padding:0; overflow:hidden; height:100%; font-family:sans-serif; background:#111; color:#eee; }
+#uiOverlay { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
+#statusPanel, #eventLog, #assocPanel {
+  position:absolute; background:rgba(0,0,0,0.7); padding:10px; border-radius:5px; font-size:12px; max-width:250px;
+}
+#statusPanel { top:10px; right:10px; }
+#eventLog { top:10px; left:10px; max-height:200px; overflow-y:auto; }
+#assocPanel { bottom:10px; left:10px; display:flex; flex-direction:column; }
+.button { background:#444; color:#eee; padding:6px 10px; margin:2px; border-radius:5px; cursor:pointer; pointer-events:auto; }
+.button:hover { background:#666; }
+</style>
+</head>
+<body>
+<div id="uiOverlay">
+  <div id="statusPanel"></div>
+  <div id="eventLog"></div>
+  <div id="assocPanel">
+    <div class="button" id="btnForward">前進</div>
+    <div class="button" id="btnBack">後退</div>
+    <div class="button" id="btnLeft">左移動</div>
+    <div class="button" id="btnRight">右移動</div>
+    <div class="button" id="btnUseCamera">監視カメラ</div>
+    <div class="button" id="btnInvestigate">調査/交渉</div>
+    <div class="button" id="btnUpgrade">装備/施設</div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r152/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.152.2/examples/js/controls/PointerLockControls.js"></script>
+
+<script>
+// --------------------
+// 初期データ
+// --------------------
+const spotNames = ["S病院","廃校","廃工場","廃坑","御神木","廃旅館","廃橋","廃墓地","廃船","奇岩"];
+const phenomenaTypes = ["視覚","音響","物理","環境","接触","奇妙"];
+const dangerousGhosts = ["怨霊","憑依霊","悪霊","彷徨霊","怒れる幽霊"];
+let spots = [];
+let player = {
+  hp:100, mp:100,
+  skills:{霊感:5,分析:5,忍耐:5},
+  level:1,
+  equipment:{カメラ:true,録音機:true,懐中電灯:true,護符:true,監視カメラ:true},
+  pos:new THREE.Vector3(0,0,0),
+  points:0,
+  dataCollected:[]
+};
+let currentSpot = null;
+
+// --------------------
+// Three.js シーン設定
+// --------------------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x111111);
+
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+camera.position.set(0,2,5);
+
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const controls = new THREE.PointerLockControls(camera, renderer.domElement);
+document.body.addEventListener('click',()=>{controls.lock();});
+
+// 床
+const floorGeo = new THREE.PlaneGeometry(500,500,50,50);
+const floorMat = new THREE.MeshStandardMaterial({color:0x222222});
+const floor = new THREE.Mesh(floorGeo, floorMat);
+floor.rotation.x = -Math.PI/2;
+scene.add(floor);
+
+// ライト
+const hemi = new THREE.HemisphereLight(0xffffff,0x444444,1);
+hemi.position.set(0,50,0);
+scene.add(hemi);
+const dirLight = new THREE.DirectionalLight(0xffffff,0.8);
+dirLight.position.set(-10,20,10);
+scene.add(dirLight);
+
+// --------------------
+// スポット生成
+// --------------------
+function generateSpots(){
+  for(let i=0;i<50;i++){
+    let danger = Math.floor(Math.random()*5)+1;
+    if(Math.random()<0.01) danger=6;
+    let spot = {
+      id:i,
+      name:spotNames[Math.floor(Math.random()*spotNames.length)],
+      x:Math.random()*400-200,
+      z:Math.random()*400-200,
+      danger: danger,
+      phenomenon: phenomenaTypes[Math.floor(Math.random()*phenomenaTypes.length)],
+      discovered:false,
+      dangerousGhost: (danger===6 && Math.random()<0.5) ? dangerousGhosts[Math.floor(Math.random()*dangerousGhosts.length)] : null
+    };
+    spot.mesh = createSpotMesh(spot);
+    scene.add(spot.mesh);
+    spots.push(spot);
+  }
+}
+
+function createSpotMesh(spot){
+  const geo = new THREE.CylinderGeometry(0.8,0.8,3,12);
+  let color = spot.danger>=5 ? 0x800080 : spot.danger>=3 ? 0xff8800 : 0xff0000;
+  const mat = new THREE.MeshStandardMaterial({color:color});
+  const mesh = new THREE.Mesh(geo,mat);
+  mesh.position.set(spot.x,1.5,spot.z);
+  mesh.userData.spotId = spot.id;
+  return mesh;
+}
+
+// --------------------
+// レイキャストでスポット選択
+// --------------------
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+function selectSpot(event){
+  if(event.type==="click"){
+    mouse.x = ( event.clientX / window.innerWidth ) * 2 - 1;
+    mouse.y = - ( event.clientY / window.innerHeight ) * 2 + 1;
+  }
+  raycaster.setFromCamera(mouse,camera);
+  const intersects = raycaster.intersectObjects(spots.map(s=>s.mesh));
+  if(intersects.length>0){
+    const spotId = intersects[0].object.userData.spotId;
+    currentSpot = spots[spotId];
+    logEvent(`スポット選択: ${currentSpot.name} (危険度${currentSpot.danger})`);
+  }
+}
+window.addEventListener('click',selectSpot);
+
+// --------------------
+// UI更新
+// --------------------
+function updateStatus(){
+  const st = document.getElementById("statusPanel");
+  st.innerHTML=`HP:${player.hp} | 精神:${player.mp}<br>
+  レベル:${player.level}<br>
+  霊感:${player.skills.霊感} 分析:${player.skills.分析} 忍耐:${player.skills.忍耐}<br>
+  協会ポイント:${player.points}<br>
+  装備:${Object.keys(player.equipment).filter(k=>player.equipment[k]).join(", ")}`;
+}
+
+function logEvent(msg){
+  const log = document.getElementById("eventLog");
+  const entry = document.createElement("div");
+  entry.textContent=msg;
+  log.prepend(entry);
+}
+
+// --------------------
+// 調査/交渉
+// --------------------
+function investigateSpot(){
+  if(!currentSpot){ alert("スポットを選択してください"); return; }
+  logEvent(`調査開始: ${currentSpot.name}`);
+  let danger=currentSpot.danger;
+  let result="", pointsGained=0;
+  if(currentSpot.dangerousGhost && Math.random()*10<player.skills.霊感){
+    result=`危険な幽霊発見！交渉成功: ${currentSpot.dangerousGhost}`;
+    pointsGained=50;
+  } else if(currentSpot.dangerousGhost){
+    result=`危険な幽霊発見！交渉失敗: ${currentSpot.dangerousGhost}`;
+    player.hp-=20; player.mp-=15;
+    pointsGained=20;
+  } else if(Math.random()*10<player.skills.霊感){
+    result=`幽霊と交渉に成功`;
+    pointsGained=30;
+  } else {
+    result=`現象発生！安全策で回避`;
+    player.hp-=5; player.mp-=5;
+    pointsGained=10;
+  }
+  if(danger===6 && !currentSpot.dangerousGhost){
+    result="危険度6スポット！複合現象発生！";
+    player.hp-=15; player.mp-=10;
+    pointsGained+=40;
+  }
+  player.points+=pointsGained;
+  player.dataCollected.push({spot:currentSpot.name, points:pointsGained});
+  logEvent(result);
+  currentSpot.discovered=true;
+  updateStatus();
+}
+
+// --------------------
+// 監視カメラ
+// --------------------
+function useCamera(){
+  if(!player.equipment.監視カメラ){ alert("監視カメラを持っていません"); return; }
+  if(!currentSpot){ alert("スポットを選択してください"); return; }
+  let msg=`監視カメラ使用: ${currentSpot.name} 現象:${currentSpot.phenomenon}`;
+  if(currentSpot.dangerousGhost) msg+=` 危険な幽霊:${currentSpot.dangerousGhost}`;
+  logEvent(msg);
+}
+
+// --------------------
+// 移動
+// --------------------
+const moveSpeed = 0.5;
+let moveForwardFlag=false, moveBackFlag=false, moveLeftFlag=false, moveRightFlag=false;
+function updateMovement(){
+  const dir = new THREE.Vector3();
+  if(moveForwardFlag) dir.z-=moveSpeed;
+  if(moveBackFlag) dir.z+=moveSpeed;
+  if(moveLeftFlag) dir.x-=moveSpeed;
+  if(moveRightFlag) dir.x+=moveSpeed;
+  controls.moveRight(dir.x);
+  controls.moveForward(dir.z);
+}
+
+// --------------------
+// UIイベント
+// --------------------
+document.getElementById("btnForward").onmousedown=()=>moveForwardFlag=true;
+document.getElementById("btnForward").onmouseup=()=>moveForwardFlag=false;
+document.getElementById("btnBack").onmousedown=()=>moveBackFlag=true;
+document.getElementById("btnBack").onmouseup=()=>moveBackFlag=false;
+document.getElementById("btnLeft").onmousedown=()=>moveLeftFlag=true;
+document.getElementById("btnLeft").onmouseup=()=>moveLeftFlag=false;
+document.getElementById("btnRight").onmousedown=()=>moveRightFlag=true;
+document.getElementById("btnRight").onmouseup=()=>moveRightFlag=false;
+document.getElementById("btnUseCamera").onclick=useCamera;
+document.getElementById("btnInvestigate").onclick=investigateSpot;
+document.getElementById("btnUpgrade").onclick=()=>{ alert("装備/施設アップグレード画面（簡易表示）"); };
+
+// --------------------
+// 初期化
+// --------------------
+generateSpots();
+updateStatus();
+logEvent("3D本格版ゲーム開始！PC/スマホ対応済。危険な幽霊も出現。");
+
+// --------------------
+// アニメーション
+// --------------------
+function animate(){
+  requestAnimationFrame(animate);
+  updateMovement();
+  renderer.render(scene,camera);
+}
+animate();
+
+// リサイズ対応
+window.addEventListener('resize',()=>{
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
